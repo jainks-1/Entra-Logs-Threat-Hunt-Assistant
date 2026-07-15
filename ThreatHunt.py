@@ -223,6 +223,7 @@ def analyze_interactive(df, log_type, params):
         travel_df['Prev_State'] = travel_df.groupby('User')['State'].shift(1)
         travel_df['Prev_Location'] = travel_df.groupby('User')['Location'].shift(1)
         travel_df['Prev_Time'] = travel_df.groupby('User')['Date (UTC)'].shift(1)
+        travel_df['Prev_IP'] = travel_df.groupby('User')['IP address'].shift(1) if 'IP address' in travel_df.columns else "Unknown"
         travel_df['Time_Diff_Mins'] = (travel_df['Date (UTC)'] - travel_df['Prev_Time']).dt.total_seconds() / 60.0
         
         imp_travel = travel_df[
@@ -235,12 +236,49 @@ def analyze_interactive(df, log_type, params):
         if not imp_travel.empty:
             findings_found = True
             summary["Critical"].append(f"Impossible Travel (<30 mins): {len(imp_travel)} instance(s) detected.")
-            details.append(f"[!] WARNING: Found {len(imp_travel)} instance(s) of Impossible Travel (<30 mins between states).\n")
-            details.append("-" * 50 + "\n")
+            
+            travel_details = []
+            travel_details.append(f"[!] WARNING: Found {len(imp_travel)} instance(s) of Impossible Travel (<30 mins between states).\n")
+            travel_details.append("-" * 50 + "\n")
+            
+            high_risk_users = set()
+            user_blocks = []
+            
             for user, group in imp_travel.groupby('User'):
-                all_locs = set(group['Location'].dropna().unique()).union(set(group['Prev_Location'].dropna().unique()))
-                loc_str = " / ".join(sorted(list(all_locs)))
-                details.append(f"{user} - {len(group)} instance(s) of impossible travel\nLocations: {loc_str}\n\n")
+                loc_ips = set()
+                states = set()
+                
+                for _, row in group.iterrows():
+                    cur_loc = row['Location'] if pd.notna(row['Location']) else 'Unknown'
+                    cur_ip = row.get('IP address', 'Unknown')
+                    if pd.isna(cur_ip): cur_ip = 'Unknown'
+                    
+                    prev_loc = row['Prev_Location'] if pd.notna(row['Prev_Location']) else 'Unknown'
+                    prev_ip = row.get('Prev_IP', 'Unknown')
+                    if pd.isna(prev_ip): prev_ip = 'Unknown'
+
+                    loc_ips.add(f"{cur_loc} ({cur_ip})")
+                    loc_ips.add(f"{prev_loc} ({prev_ip})")
+                    
+                    if pd.notna(row['State']): states.add(row['State'])
+                    if pd.notna(row['Prev_State']): states.add(row['Prev_State'])
+                    
+                if len(states) > 3:
+                    high_risk_users.add(user)
+                    
+                loc_str = " / ".join(sorted(list(loc_ips)))
+                user_blocks.append(f"{user} - {len(group)} instance(s) of impossible travel\nLocations: {loc_str}\n\n")
+
+            if high_risk_users:
+                travel_details.append("+" + "-" * 50 + "+\n")
+                travel_details.append(f"| HIGH RISK: Users signing in from > 3 states{'':<6}|\n")
+                travel_details.append("+" + "-" * 50 + "+\n")
+                for h_user in sorted(list(high_risk_users)):
+                    travel_details.append(f"| - {h_user:<46}|\n")
+                travel_details.append("+" + "-" * 50 + "+\n\n")
+                
+            travel_details.extend(user_blocks)
+            details.extend(travel_details)
 
         foreign = df[(~df['Country'].str.upper().isin(['US', 'USA', 'UNITED STATES', 'UNKNOWN'])) & (df['Country'].notna())].copy()
         if not foreign.empty:
@@ -272,7 +310,12 @@ def analyze_interactive(df, log_type, params):
 
     if cfg['iocs']:
         leg_hits = df[df['Client app'].str.contains('Exchange ActiveSync|IMAP4|POP3|Legacy', na=False, case=False)]
-        agt_hits = df[df['User agent'].str.contains('python-requests|curl|wget|nmap|powershell|httpclient', na=False, case=False)]
+        agt_hits = df[df['User agent'].str.contains('python-requests|curl|wget|nmap|powershell|httpclient', na=False, case=False)].copy()
+
+        # Ensure agent logs are only captured for successful logins
+        if not agt_hits.empty and 'Sign-in error code' in agt_hits.columns:
+            agt_hits['Clean_Error'] = agt_hits['Sign-in error code'].fillna('0').astype(str).str.replace('.0', '', regex=False).str.strip()
+            agt_hits = agt_hits[agt_hits['Clean_Error'].isin(['0', 'None', 'nan', '', 'NaN'])]
 
         if not leg_hits.empty:
             findings_found = True
@@ -282,10 +325,11 @@ def analyze_interactive(df, log_type, params):
             for _, row in leg_hits.iterrows():
                 details.append(f"User: {row['User']} | App: {row['Client app']} | IP: {row.get('IP address', 'Unknown')}\n")
             details.append("\n")
+            
         if not agt_hits.empty:
             findings_found = True
             summary["Suspicious"].append(f"Suspicious User Agents: {len(agt_hits)} instance(s) found.")
-            details.append(f"[!] WARNING: Found {len(agt_hits)} Suspicious Agent sign-ins.\n")
+            details.append(f"[!] WARNING: Found {len(agt_hits)} Suspicious Agent sign-ins (Successful Logins).\n")
             details.append("-" * 50 + "\n")
             for _, row in agt_hits.iterrows():
                 details.append(f"User: {row['User']} | Agent: {row['User agent']} | IP: {row.get('IP address', 'Unknown')}\n")
@@ -345,6 +389,7 @@ def analyze_non_interactive(df, log_type, params):
         travel_df['Prev_State'] = travel_df.groupby('User')['State'].shift(1)
         travel_df['Prev_Location'] = travel_df.groupby('User')['Location'].shift(1)
         travel_df['Prev_Time'] = travel_df.groupby('User')['Date (UTC)'].shift(1)
+        travel_df['Prev_IP'] = travel_df.groupby('User')['IP address'].shift(1) if 'IP address' in travel_df.columns else "Unknown"
         travel_df['Time_Diff_Mins'] = (travel_df['Date (UTC)'] - travel_df['Prev_Time']).dt.total_seconds() / 60.0
         
         imp_travel = travel_df[
@@ -357,12 +402,49 @@ def analyze_non_interactive(df, log_type, params):
         if not imp_travel.empty:
             findings_found = True
             summary["Critical"].append(f"Impossible Travel (<30 mins): {len(imp_travel)} instance(s) detected.")
-            details.append(f"[!] WARNING: Found {len(imp_travel)} instance(s) of Impossible Travel (<30 mins between states).\n")
-            details.append("-" * 50 + "\n")
+            
+            travel_details = []
+            travel_details.append(f"[!] WARNING: Found {len(imp_travel)} instance(s) of Impossible Travel (<30 mins between states).\n")
+            travel_details.append("-" * 50 + "\n")
+            
+            high_risk_users = set()
+            user_blocks = []
+            
             for user, group in imp_travel.groupby('User'):
-                all_locs = set(group['Location'].dropna().unique()).union(set(group['Prev_Location'].dropna().unique()))
-                loc_str = " / ".join(sorted(list(all_locs)))
-                details.append(f"{user} - {len(group)} instance(s) of impossible travel\nLocations: {loc_str}\n\n")
+                loc_ips = set()
+                states = set()
+                
+                for _, row in group.iterrows():
+                    cur_loc = row['Location'] if pd.notna(row['Location']) else 'Unknown'
+                    cur_ip = row.get('IP address', 'Unknown')
+                    if pd.isna(cur_ip): cur_ip = 'Unknown'
+                    
+                    prev_loc = row['Prev_Location'] if pd.notna(row['Prev_Location']) else 'Unknown'
+                    prev_ip = row.get('Prev_IP', 'Unknown')
+                    if pd.isna(prev_ip): prev_ip = 'Unknown'
+
+                    loc_ips.add(f"{cur_loc} ({cur_ip})")
+                    loc_ips.add(f"{prev_loc} ({prev_ip})")
+                    
+                    if pd.notna(row['State']): states.add(row['State'])
+                    if pd.notna(row['Prev_State']): states.add(row['Prev_State'])
+                    
+                if len(states) > 3:
+                    high_risk_users.add(user)
+                    
+                loc_str = " / ".join(sorted(list(loc_ips)))
+                user_blocks.append(f"{user} - {len(group)} instance(s) of impossible travel\nLocations: {loc_str}\n\n")
+
+            if high_risk_users:
+                travel_details.append("+" + "-" * 50 + "+\n")
+                travel_details.append(f"| HIGH RISK: Users signing in from > 3 states{'':<6}|\n")
+                travel_details.append("+" + "-" * 50 + "+\n")
+                for h_user in sorted(list(high_risk_users)):
+                    travel_details.append(f"| - {h_user:<46}|\n")
+                travel_details.append("+" + "-" * 50 + "+\n\n")
+                
+            travel_details.extend(user_blocks)
+            details.extend(travel_details)
 
         foreign = df[(~df['Country'].str.upper().isin(['US', 'USA', 'UNITED STATES', 'UNKNOWN'])) & (df['Country'].notna())].copy()
         if not foreign.empty:
@@ -382,11 +464,17 @@ def analyze_non_interactive(df, log_type, params):
 
     if cfg['agents']:
         member_df = df[df['User type'].astype(str).str.contains('Member', case=False, na=False)]
-        agent_hits = member_df[member_df['User agent'].str.contains('python|curl|wget|nmap|powershell|httpclient|go-http-client', na=False, case=False)]
+        agent_hits = member_df[member_df['User agent'].str.contains('python|curl|wget|nmap|powershell|httpclient|go-http-client', na=False, case=False)].copy()
+        
+        # Ensure agent logs are only captured for successful logins
+        if not agent_hits.empty and 'Sign-in error code' in agent_hits.columns:
+            agent_hits['Clean_Error'] = agent_hits['Sign-in error code'].fillna('0').astype(str).str.replace('.0', '', regex=False).str.strip()
+            agent_hits = agent_hits[agent_hits['Clean_Error'].isin(['0', 'None', 'nan', '', 'NaN'])]
+
         if not agent_hits.empty:
             findings_found = True
             summary["Suspicious"].append(f"Scripting Agents on Standard Accounts: {len(agent_hits)} instance(s).")
-            details.append(f"[!] WARNING: Found {len(agent_hits)} instance(s) of Scripting Agents on Standard Member accounts.\n")
+            details.append(f"[!] WARNING: Found {len(agent_hits)} instance(s) of Scripting Agents on Standard Member accounts (Successful Logins).\n")
             details.append("-" * 50 + "\n")
             for _, row in agent_hits.iterrows():
                 details.append(f"User: {row['User']} | Agent: {row['User agent']} | App: {row.get('Application', 'Unknown')}\n")

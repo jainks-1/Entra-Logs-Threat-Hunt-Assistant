@@ -18,8 +18,8 @@ Run the dependency script for your operating system to install the required Pyth
 ## Usage
 1. Open a terminal or command prompt and run the script:
    ```bash
-   python 07142026_ThreatHunt.py
+   python ThreatHunt.py
 
 OR
 
-1. Double click 07142026_ThreatHunt.py in file explorer
+1. Double click ThreatHunt.py in file explorer

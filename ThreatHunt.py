@@ -4,6 +4,9 @@ import json
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import threading
+import random
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import PatternFill
 
 def safe_json_load(x):
     """Safely parse the Purview AuditData JSON string."""
@@ -18,6 +21,7 @@ def toggle_options():
     sui_frame.pack_forget()
     suni_frame.pack_forget()
     purview_frame.pack_forget()
+    color_sort_frame.pack_forget()
     
     selection = log_type_var.get()
     if selection == "Interactive":
@@ -30,6 +34,8 @@ def toggle_options():
         suni_frame.pack(fill="x")
     elif selection == "Purview":
         purview_frame.pack(fill="x")
+    elif selection == "ColorSort":
+        color_sort_frame.pack(fill="x")
 
 def run_check():
     file_path = file_path_var.get()
@@ -39,7 +45,6 @@ def run_check():
 
     log_type = log_type_var.get()
     
-    # 1. Quick Header Validation in Main Thread
     try:
         if file_path.lower().endswith('.csv'):
             headers = pd.read_csv(file_path, nrows=0, low_memory=False).columns
@@ -51,20 +56,24 @@ def run_check():
 
     col_lower = [col.strip().lower() for col in headers]
     
-    ni_indicators = ['client credential type', 'managed identity type', 'federated token id']
-    purview_indicators = ['auditdata', 'recordid', 'recordtype']
-    
-    is_likely_ni = any(ind in col_lower for ind in ni_indicators)
-    is_likely_purview = any(ind in col_lower for ind in purview_indicators)
-
-    if log_type == "Purview" and not is_likely_purview:
-        if not messagebox.askyesno("Dataset Mismatch", "This file is missing 'AuditData' or 'RecordType' and does not appear to be a Purview log.\n\nAre you sure you want to proceed?"):
+    if log_type == "ColorSort":
+        if 'session id' not in col_lower:
+            messagebox.showerror("Validation Error", "The file must contain a 'Session ID' column for this feature.")
             return
-    elif log_type in ["Interactive", "SUI"] and is_likely_ni:
-        if not messagebox.askyesno("Dataset Mismatch", "This file appears to contain populated Non-Interactive columns.\n\nAre you sure you want to run Interactive checks?"):
-            return
+    else:
+        ni_indicators = ['client credential type', 'managed identity type', 'federated token id']
+        purview_indicators = ['auditdata', 'recordid', 'recordtype']
+        
+        is_likely_ni = any(ind in col_lower for ind in ni_indicators)
+        is_likely_purview = any(ind in col_lower for ind in purview_indicators)
 
-    # 2. Gather GUI parameters
+        if log_type == "Purview" and not is_likely_purview:
+            if not messagebox.askyesno("Dataset Mismatch", "This file is missing 'AuditData' or 'RecordType' and does not appear to be a Purview log.\n\nAre you sure you want to proceed?"):
+                return
+        elif log_type in ["Interactive", "SUI"] and is_likely_ni:
+            if not messagebox.askyesno("Dataset Mismatch", "This file appears to contain populated Non-Interactive columns.\n\nAre you sure you want to run Interactive checks?"):
+                return
+
     params = {
         'file_path': file_path,
         'log_type': log_type,
@@ -75,12 +84,75 @@ def run_check():
         'purview': {'inbox': purview_inbox_var.get(), 'mass_ops': purview_mass_op_var.get(), 'edisc': purview_edisc_var.get(), 'mailbox': purview_mailbox_var.get()}
     }
 
-    # 3. Start Thread
-    status_label.config(text=f"Analyzing...\nFile: {os.path.basename(file_path)}")
+    status_label.config(text=f"Processing...\nFile: {os.path.basename(file_path)}")
     run_btn.config(state="disabled")
     threading.Thread(target=process_analysis, args=(params,), daemon=True).start()
 
+def generate_safe_color():
+    while True:
+        r = random.randint(180, 255)
+        g = random.randint(180, 255)
+        b = random.randint(200, 255) 
+        
+        if r > 220 and g < 200 and b < 200: continue
+        if g > 220 and r < 200 and b < 200: continue
+        if abs(r-g) < 10 and abs(g-b) < 10 and r > 230: continue
+        
+        return f"{r:02X}{g:02X}{b:02X}"
+
+def process_color_sort(params):
+    try:
+        file_path = params['file_path']
+        output_dir = os.path.dirname(file_path)
+        base_name = os.path.splitext(os.path.basename(file_path))[0]
+        output_filename = os.path.join(output_dir, f"{base_name}_ColorSorted.xlsx")
+
+        if file_path.lower().endswith('.csv'):
+            df = pd.read_csv(file_path, low_memory=False)
+            wb = Workbook()
+            ws = wb.active
+            ws.append(list(df.columns))
+            for row in df.itertuples(index=False, name=None):
+                ws.append(row)
+        else:
+            wb = load_workbook(file_path)
+            ws = wb.active
+        
+        headers = [cell.value for cell in ws[1]]
+        session_col_idx = None
+        for idx, h in enumerate(headers):
+            if h and str(h).strip().lower() == 'session id':
+                session_col_idx = idx + 1
+                break
+                
+        if session_col_idx is None:
+            app.after(0, lambda: update_ui_error("Column 'Session ID' not found in the file."))
+            return
+
+        session_colors = {}
+        
+        for row_idx in range(2, ws.max_row + 1):
+            cell = ws.cell(row=row_idx, column=session_col_idx)
+            session_id = cell.value
+            
+            if session_id:
+                if session_id not in session_colors:
+                    session_colors[session_id] = generate_safe_color()
+                
+                fill_color = session_colors[session_id]
+                cell.fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type="solid")
+
+        wb.save(output_filename)
+        app.after(0, lambda: update_ui_success(output_filename, True, is_color_sort=True))
+
+    except Exception as e:
+        app.after(0, lambda: update_ui_error(f"Failed to process Color Sort:\n{e}"))
+
 def process_analysis(params):
+    if params['log_type'] == "ColorSort":
+        process_color_sort(params)
+        return
+
     try:
         file_path = params['file_path']
         log_type = params['log_type']
@@ -140,10 +212,12 @@ def write_report(file_path, log_type, findings_found, summary, details):
     except Exception as e:
         app.after(0, lambda: update_ui_error(f"Failed to save report:\n{e}"))
 
-def update_ui_success(output_filename, findings_found):
-    status_label.config(text=f"Status: Done! Report saved to {output_filename}")
+def update_ui_success(output_filename, findings_found, is_color_sort=False):
+    status_label.config(text=f"Status: Done! Saved to {os.path.basename(output_filename)}")
     run_btn.config(state="normal")
-    if not findings_found:
+    if is_color_sort:
+        messagebox.showinfo("Color Sort Complete", f"File successfully processed and saved to:\n{os.path.abspath(output_filename)}")
+    elif not findings_found:
         messagebox.showinfo("Analysis Complete", "No suspicious findings. All clear!")
     else:
         messagebox.showwarning("Findings Detected", f"Suspicious activity found based on your parameters.\n\nReport saved to:\n{os.path.abspath(output_filename)}")
@@ -312,7 +386,6 @@ def analyze_interactive(df, log_type, params):
         leg_hits = df[df['Client app'].str.contains('Exchange ActiveSync|IMAP4|POP3|Legacy', na=False, case=False)]
         agt_hits = df[df['User agent'].str.contains('python-requests|curl|wget|nmap|powershell|httpclient', na=False, case=False)].copy()
 
-        # Ensure agent logs are only captured for successful logins
         if not agt_hits.empty and 'Sign-in error code' in agt_hits.columns:
             agt_hits['Clean_Error'] = agt_hits['Sign-in error code'].fillna('0').astype(str).str.replace('.0', '', regex=False).str.strip()
             agt_hits = agt_hits[agt_hits['Clean_Error'].isin(['0', 'None', 'nan', '', 'NaN'])]
@@ -466,7 +539,6 @@ def analyze_non_interactive(df, log_type, params):
         member_df = df[df['User type'].astype(str).str.contains('Member', case=False, na=False)]
         agent_hits = member_df[member_df['User agent'].str.contains('python|curl|wget|nmap|powershell|httpclient|go-http-client', na=False, case=False)].copy()
         
-        # Ensure agent logs are only captured for successful logins
         if not agent_hits.empty and 'Sign-in error code' in agent_hits.columns:
             agent_hits['Clean_Error'] = agent_hits['Sign-in error code'].fillna('0').astype(str).str.replace('.0', '', regex=False).str.strip()
             agent_hits = agent_hits[agent_hits['Clean_Error'].isin(['0', 'None', 'nan', '', 'NaN'])]
@@ -590,7 +662,7 @@ def browse_file():
 
 app = tk.Tk()
 app.title("SOC Threat Hunt Analyzer")
-app.geometry("550x650")
+app.geometry("550x700")
 app.resizable(False, False)
 
 file_path_var = tk.StringVar()
@@ -616,6 +688,8 @@ row2 = tk.Frame(radio_container); row2.pack(anchor="center", pady=2)
 tk.Radiobutton(row2, text="Single User Int.", variable=log_type_var, value="SUI", command=toggle_options).pack(side="left", padx=10)
 tk.Radiobutton(row2, text="Single User Non-Int.", variable=log_type_var, value="SUNI", command=toggle_options).pack(side="left", padx=10)
 tk.Radiobutton(row2, text="Purview", variable=log_type_var, value="Purview", command=toggle_options).pack(side="left", padx=10)
+row3 = tk.Frame(radio_container); row3.pack(anchor="center", pady=2)
+tk.Radiobutton(row3, text="SessionID Color Sort", variable=log_type_var, value="ColorSort", command=toggle_options).pack(side="left", padx=10)
 
 options_container = tk.Frame(app); options_container.pack(fill="x", padx=20, pady=10)
 interactive_frame = tk.LabelFrame(options_container, text="Interactive Parameters", padx=10, pady=10)
@@ -648,6 +722,9 @@ tk.Checkbutton(purview_frame, text="Inbox Rules: New/Modified Inbox Forwarding R
 tk.Checkbutton(purview_frame, text="Mass Operations: Bulk File Deletions or Downloads (>20)", variable=purview_mass_op_var).pack(anchor="w")
 tk.Checkbutton(purview_frame, text="Reconnaissance: eDiscovery / Admin Search Executed", variable=purview_edisc_var).pack(anchor="w")
 tk.Checkbutton(purview_frame, text="Mailbox Access: MailItemsAccessed & Delegate Logins", variable=purview_mailbox_var).pack(anchor="w")
+
+color_sort_frame = tk.LabelFrame(options_container, text="SessionID Color Sort", padx=10, pady=10)
+tk.Label(color_sort_frame, text="This feature isolates the 'Session ID' column and highlights unique sessions\nwith random, light colors to visually group them. It preserves your original\nfile and outputs a brand new Excel (.xlsx) document to your directory.", justify="left").pack(anchor="w")
 
 interactive_frame.pack(fill="x")
 
